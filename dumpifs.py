@@ -2,19 +2,20 @@ from pathlib import Path
 import os
 import sys
 import re
+import tempfile
 from ctypes import sizeof, c_uint16, c_byte, create_string_buffer, c_int32, c_uint32, byref, c_ushort, c_uint, c_uint64, \
     string_at, addressof, POINTER
+from struct import unpack
 import errno
 import shutil
 import logging
-from typing import BinaryIO
+from typing import BinaryIO, Union
 
-import pexpect
 from startup_image import struct_startup_header, struct_image_header, struct_image_trailer, \
     STARTUP_HDR_FLAGS1_COMPRESS_MASK, \
     STARTUP_HDR_FLAGS1_COMPRESS_UCL, struct_image_attr, IMAGE_FLAGS_BIGENDIAN, STARTUP_HDR_FLAGS1_BIGENDIAN, \
     STARTUP_HDR_FLAGS1_COMPRESS_ZLIB, STARTUP_HDR_FLAGS1_COMPRESS_LZO, gzFile_s
-from struct import unpack
+from utils import run_v1
 
 logger = logging.getLogger(__name__)
 
@@ -30,14 +31,16 @@ g_verbose = False
 
 
 from forbiddenfruit import curse
-def ushort_byteswap(this:c_ushort)->c_ushort:
-    return c_ushort(int.from_bytes(this.value.to_bytes(sizeof(c_ushort), 'little'), 'big', signed=False))
 
-def uint_byteswap(this:c_uint)->c_uint:
-    return c_uint(int.from_bytes(this.value.to_bytes(sizeof(c_uint), 'little'), 'big', signed=False))
+def int_byteswap(this:int, bytelen:int)->int:
+    return int.from_bytes(this.to_bytes(bytelen, 'little'), 'big', signed=False)
 
-curse(c_ushort, 'byteswap', ushort_byteswap)
-curse(c_uint, 'byteswap', uint_byteswap)
+curse(int, 'byteswap', int_byteswap)
+
+
+decompress_bin_path = Path(tempfile.mkstemp(prefix='ifs_decompressed', suffix='.bin')[1])
+startup_header_pattern = b'\xEB\x7E\xFF\x00.{46}\x00{14}'
+image_header_pattern = b'imagefs[\x00-\x07]'
 
 
 def main() -> int:
@@ -51,7 +54,6 @@ def main() -> int:
     outputdir = Path(args.outputdir).expanduser().resolve()
     global g_verbose
     g_verbose = args.verbose
-    # ifs_filepath = os.path.expandvars(Path("~/qnx_sdp7.ifs"))
 
     shutil.rmtree(outputdir, ignore_errors=True)
     outputdir.mkdir(parents=True, exist_ok=True)
@@ -59,13 +61,17 @@ def main() -> int:
     if not ifs_filepath.is_file():
         logger.error(f'{ifs_filepath=} is not a file')
         return errno.ENOENT
-    res = process(ifs_filepath, outputdir)
-    return res
+    try:
+        res = process(ifs_filepath, outputdir)
+        return res
+    finally:
+        global decompress_bin_path
+        try:
+            decompress_bin_path.unlink(missing_ok=True)
+        except Exception as ex:
+            logger.info(f'{ex=} while deleting {decompress_bin_path=}')
+            pass
 
-
-decompress_bin_path = Path("~/decompressed.bin").expanduser()
-startup_header_pattern = b'\xEB\x7E\xFF\x00.{46}\x00{14}'
-image_header_pattern = b'imagefs[\x00-\x07]'
 
 
 def process(ifs_file: Path, outputdir: Path) -> int:
@@ -102,7 +108,8 @@ def process(ifs_file: Path, outputdir: Path) -> int:
 def shdr_byteswap(shdr: struct_startup_header)->struct_startup_header:
     for i in range(4,17):
         fname = shdr._fields_[i][0]
-        setattr(shdr, fname,  getattr(shdr, fname).byteswap())
+        bytelen = getattr(struct_startup_header, fname).size
+        setattr(shdr, fname,  getattr(shdr, fname).byteswap(bytelen))
     return shdr
 
 
@@ -189,19 +196,20 @@ def decompress_ifs(fin: BinaryIO, shdr: struct_startup_header, spos: int) -> int
 def ihdr_byteswap(ihdr:struct_image_header)->struct_image_header:
     # buf = string_at(addressof(ihdr), sizeof(ihdr))
     # pInt = POINTER(c_uint)(buf)
+    struct_image_header.image_size.offset
 
-    ihdr.image_size = ihdr.image_size.byteswap()
-    ihdr.hdr_dir_size = ihdr.hdr_dir_size.byteswap()
-    ihdr.dir_offset = ihdr.dir_offset.byteswap()
+    ihdr.image_size = ihdr.image_size.byteswap(4)
+    ihdr.hdr_dir_size = ihdr.hdr_dir_size.byteswap(4)
+    ihdr.dir_offset = ihdr.dir_offset.byteswap(4)
     for i in range(4):
-        ihdr.boot_ino[i] = ihdr.boot_ino[i].byteswap()
-    ihdr.script_ino = ihdr.script_ino.byteswap()
-    ihdr.chain_paddr = ihdr.chain_paddr.byteswap()
+        ihdr.boot_ino[i] = ihdr.boot_ino[i].byteswap(4)
+    ihdr.script_ino = ihdr.script_ino.byteswap(4)
+    ihdr.chain_paddr = ihdr.chain_paddr.byteswap(4)
     return ihdr
 
 
-def process_uncompressed(ifs_filepath: Path, outputdir: Path, shdr: struct_startup_header | None, spos: int,
-                         ihdr: struct_image_header | None, ipos: int) -> int:
+def process_uncompressed(ifs_filepath: Path, outputdir: Path, shdr: Union[struct_startup_header, None], spos: int,
+                         ihdr: Union[struct_image_header, None], ipos: int) -> int:
     """
 
     :param ifs_filepath: not compressed or decompressed IFS file
@@ -296,7 +304,8 @@ def process_uncompressed(ifs_filepath: Path, outputdir: Path, shdr: struct_start
 
 def attr_byteswap(attr:struct_image_attr)->struct_image_attr:
     for fn, _ in attr._fields_:
-        v = getattr(attr, fn).byteswap()
+        bytelen = getattr(struct_image_attr, fn).size
+        v = getattr(attr, fn).byteswap(bytelen)
         setattr(attr, fn, v)
     return attr
 
@@ -315,9 +324,9 @@ def process_file(fin2: BinaryIO, outputdir: Path, ipos: int, attr: struct_image_
         fout.write(fin2.read(size))
         fin2.seek(oldpos)
     os.utime(filePath, (attr.mtime, attr.mtime))
-    res = pexpect.run(f'sudo chmod {attr.mode & 0o7777:03o} {filePath}')
-    res = res.decode('ascii')
-    logger.debug(f'{res=}')
+    res = run_v1(f'sudo chmod {attr.mode & 0o7777:03o} {filePath}')
+    if res.returncode!=0:
+        logger.info(f'res.stderr=\n{res.stderr}')
 
 
 def process_dir(outputdir: Path, attr: struct_image_attr, path: str):
@@ -326,9 +335,9 @@ def process_dir(outputdir: Path, attr: struct_image_attr, path: str):
     filePath = outputdir / Path(path)
     filePath.mkdir(parents=True, exist_ok=True)
     os.utime(filePath, (attr.mtime, attr.mtime))
-    res = pexpect.run(f'sudo chmod {attr.mode & 0o7777:03o} {filePath}')
-    res = res.decode('ascii')
-    logger.debug(f'{res=}')
+    res = run_v1(f'sudo chmod {attr.mode & 0o7777:03o} {filePath}')
+    if res.returncode!=0:
+        logger.info(f'res.stderr=\n{res.stderr}')
 
 
 def display_dir(path: str):
@@ -361,9 +370,9 @@ def process_symlink(outputdir: Path, attr: struct_image_attr, path: str, target:
         os.utime(filePath, (attr.mtime, attr.mtime))
     except FileNotFoundError:
         pass
-    res = pexpect.run(f'sudo chmod {attr.mode & 0o7777:03o} {filePath}')
-    res = res.decode('ascii')
-    logger.debug(f'{res=}')
+    res = run_v1(f'sudo chmod {attr.mode & 0o7777:03o} {filePath}')
+    if res.returncode!=0:
+        logger.info(f'res.stderr=\n{res.stderr}')
 
 
 def display_symlink(sym_size: int, path: str, target: str):
@@ -408,5 +417,8 @@ def display_ihdr(ipos: int, hdr: struct_image_header):
 
 
 if __name__ == "__main__":
+    logging.basicConfig(
+        format="%(asctime)s %(name)s [%(filename)s:%(lineno)s - %(funcName)s] %(levelname)s %(message)s",
+        stream=sys.stdout, level=logging.INFO)
     ret = main()
     sys.exit(ret)

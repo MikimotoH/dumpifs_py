@@ -1,6 +1,5 @@
 ## unpack_engine
 forbiddenfruit
-pexpect
 ipdb
 ipython
 

@@ -1,0 +1,17 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "dumpifs_py",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/dumpifs.py",
+            "console": "integratedTerminal",
+            "justMyCode": true,
+            "args":["/home/miki/work/ad771be5-116b-4435-84f4-c5ab6b7d6e28_1320.bin", "-d", "/home/miki/work/ad771be5-116b-4435-84f4-c5ab6b7d6e28_1320.bin.unpack"]
+        }
+    ]
+}

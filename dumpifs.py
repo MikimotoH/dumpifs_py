@@ -14,8 +14,8 @@ from typing import BinaryIO, Union
 from startup_image import struct_startup_header, struct_image_header, struct_image_trailer, \
     STARTUP_HDR_FLAGS1_COMPRESS_MASK, \
     STARTUP_HDR_FLAGS1_COMPRESS_UCL, struct_image_attr, IMAGE_FLAGS_BIGENDIAN, STARTUP_HDR_FLAGS1_BIGENDIAN, \
-    STARTUP_HDR_FLAGS1_COMPRESS_ZLIB, STARTUP_HDR_FLAGS1_COMPRESS_LZO, gzFile_s
-from utils import run_v1
+    STARTUP_HDR_FLAGS1_COMPRESS_ZLIB, STARTUP_HDR_FLAGS1_COMPRESS_LZO, STARTUP_HDR_FLAGS1_COMPRESS_NONE, gzFile_s
+from utils import run_v1, shutil_rm
 
 logger = logging.getLogger(__name__)
 
@@ -95,13 +95,13 @@ def process(ifs_file: Path, outputdir: Path) -> int:
         print(f'Image stored_size: 0x{shdr.stored_size:08x} ')
         print(f'Compressed size: 0x{shdr.stored_size - shdr.startup_size - sizeof(struct_image_trailer)}')
 
-        if shdr.flags1 & STARTUP_HDR_FLAGS1_COMPRESS_MASK:
-            res = decompress_ifs(fin, shdr, spos)
-            if res != 0:
-                return res
-            res = process_uncompressed(decompress_bin_path, outputdir, shdr, spos, None, -1)
-            if res != 0:
-                return res
+        # if shdr.flags1 & STARTUP_HDR_FLAGS1_COMPRESS_MASK:
+        res = decompress_ifs(fin, shdr, spos)
+        if res != 0:
+            return res
+        res = process_uncompressed(decompress_bin_path, outputdir, shdr, spos, None, -1)
+        if res != 0:
+            return res
     return 0
 
 
@@ -143,7 +143,7 @@ def decompress_ifs(fin: BinaryIO, shdr: struct_startup_header, spos: int) -> int
                 fout.write(in_buf.raw[:n])
 
         elif cmpr_algo == STARTUP_HDR_FLAGS1_COMPRESS_LZO:
-            lib = cdll.LoadLibrary(find_library('lzo'))
+            lib = cdll.LoadLibrary(find_library('lzo2'))
             res = lib.lzo_init()
             if res != 0:
                 logger.error(f'lzo_init() failed, {res=}')
@@ -190,6 +190,15 @@ def decompress_ifs(fin: BinaryIO, shdr: struct_startup_header, spos: int) -> int
                 fout.write(out_buf.raw[0:out_len.value])
             if g_verbose:
                 print(f'Decompressed {til} bytes -> {tol} bytes')
+        elif cmpr_algo == STARTUP_HDR_FLAGS1_COMPRESS_NONE:
+            while True:
+                data = fin.read(sizeof(in_buf))
+                if len(data)==0:
+                    break
+                fout.write(data)    
+        else:
+            sys.stderr.write(f"{cmpr_algo=:#04x} unknown compression")
+            sys.exit(errno.EINVAL)
     return 0
 
 
@@ -324,9 +333,9 @@ def process_file(fin2: BinaryIO, outputdir: Path, ipos: int, attr: struct_image_
         fout.write(fin2.read(size))
         fin2.seek(oldpos)
     os.utime(filePath, (attr.mtime, attr.mtime))
-    res = run_v1(f'sudo chmod {attr.mode & 0o7777:03o} {filePath}')
-    if res.returncode!=0:
-        logger.info(f'res.stderr=\n{res.stderr}')
+    # res = run_v1(f'sudo chmod {attr.mode & 0o7777:03o} {filePath}')
+    # if res.returncode!=0:
+    #     logger.debug(f'res.stderr=\n{res.stderr}')
 
 
 def process_dir(outputdir: Path, attr: struct_image_attr, path: str):
@@ -334,10 +343,10 @@ def process_dir(outputdir: Path, attr: struct_image_attr, path: str):
         return
     filePath = outputdir / Path(path)
     filePath.mkdir(parents=True, exist_ok=True)
-    os.utime(filePath, (attr.mtime, attr.mtime))
-    res = run_v1(f'sudo chmod {attr.mode & 0o7777:03o} {filePath}')
-    if res.returncode!=0:
-        logger.info(f'res.stderr=\n{res.stderr}')
+    os.utime(filePath, (attr.mtime, attr.mtime), follow_symlinks=False)
+    # res = run_v1(f'sudo chmod {attr.mode & 0o7777:03o} {filePath}')
+    # if res.returncode != 0:
+    #     logger.debug(f'res.stderr=\n{res.stderr}')
 
 
 def display_dir(path: str):
@@ -362,17 +371,21 @@ def process_symlink(outputdir: Path, attr: struct_image_attr, path: str, target:
     else:
         if not sym_target.exists():
             logger.debug(f'{sym_target} not exists')
-    if target_is_abs:
-        filePath.symlink_to(target)
-    else:
-        filePath.symlink_to(target)
+    if filePath.exists():
+        shutil_rm(filePath)
     try:
-        os.utime(filePath, (attr.mtime, attr.mtime))
+        filePath.symlink_to(target)
+    except Exception as ex:
+        logger.warning('ex=%s, type(ex)=%s, filePath=%s, target=%s', ex, type(ex), filePath, target)
+    try:
+        os.utime(filePath, (attr.mtime, attr.mtime), follow_symlinks=False)
     except FileNotFoundError:
         pass
-    res = run_v1(f'sudo chmod {attr.mode & 0o7777:03o} {filePath}')
-    if res.returncode!=0:
-        logger.info(f'res.stderr=\n{res.stderr}')
+    except PermissionError:
+        pass
+    # res = run_v1(f'sudo chmod {attr.mode & 0o7777:03o} {filePath}')
+    # if res.returncode != 0:
+    #    logger.debug(f'res.stderr=\n{res.stderr}')
 
 
 def display_symlink(sym_size: int, path: str, target: str):

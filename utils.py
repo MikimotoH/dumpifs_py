@@ -1,5 +1,7 @@
 import logging
 import subprocess
+from pathlib import Path
+import shutil
 
 logger = logging.getLogger(__name__)
 class RunCmdFailed(Exception):
@@ -27,3 +29,10 @@ def run_v1(cmd: str, shell: bool = True, check_result: bool = False, suppress_wa
         elif not suppress_warning:
             logger.warning(f"cmd=`{cmd}`; {resp.returncode=} ; {resp.stderr=!s}")
     return resp
+
+
+def shutil_rm(path: Path, ignore_errors=True):
+    if path.is_symlink() or path.is_file():
+        path.unlink(missing_ok=ignore_errors)
+    elif path.is_dir():
+        shutil.rmtree(path, ignore_errors=ignore_errors)
